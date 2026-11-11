@@ -1,0 +1,75 @@
+name: ZIP release
+
+on:
+  workflow_call:
+    inputs:
+      folder:
+        description: Optional folder whose contents will be ZIPped; omit for a release without assets
+        required: false
+        default: ''
+        type: string
+      asset-name:
+        description: Optional archive filename, including extension; defaults to the folder basename plus .zip
+        required: false
+        default: ''
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    if: github.event_name == 'push' && github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        if: inputs.folder != ''
+
+      - name: ZIP folder contents
+        id: package
+        if: inputs.folder != ''
+        env:
+          SOURCE_FOLDER: ${{ inputs.folder }}
+          ASSET_NAME: ${{ inputs.asset-name }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -d "$SOURCE_FOLDER"
+          folder_name=$(basename -- "$(cd -- "$SOURCE_FOLDER" && pwd -P)")
+          filename="${ASSET_NAME:-$folder_name.zip}"
+          if [[ "$filename" == */* || "$filename" == "." || "$filename" == ".." || "$filename" == *$'\n'* || "$filename" == *$'\r'* ]]; then
+            echo "asset-name must be a filename, without directories or newlines" >&2
+            exit 1
+          fi
+          archive="$RUNNER_TEMP/$filename"
+          rm -f -- "$archive"
+          (
+            cd -- "$SOURCE_FOLDER"
+            zip -r "$archive" . \
+              -x '.git' '.git/*' '*/.git' '*/.git/*' \
+              -x '.github' '.github/*' '*/.github' '*/.github/*'
+          )
+          unzip -t "$archive"
+          printf 'archive=%s\n' "$archive" >> "$GITHUB_OUTPUT"
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+          ARCHIVE_PATH: ${{ steps.package.outputs.archive }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          assets=()
+          if [[ -n "$ARCHIVE_PATH" ]]; then
+            assets+=("$ARCHIVE_PATH")
+          fi
+          options=()
+          if [[ "$RELEASE_TAG" == *-pre ]]; then
+            options+=(--prerelease --latest=false)
+          fi
+          gh release create "$RELEASE_TAG" "${assets[@]}" "${options[@]}" \
+            --verify-tag \
+            --title "$RELEASE_TAG" \
+            --generate-notes
